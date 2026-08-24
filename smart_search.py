@@ -17,9 +17,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
-OPENAI_TEMPERATURE = float(
-    os.getenv("OPENAI_TEMPERATURE", "0")
-)
+# OPENAI_TEMPERATURE = float(
+#     os.getenv("OPENAI_TEMPERATURE", "0")
+# )
 
 
 # ============================================================
@@ -316,7 +316,7 @@ Return ONLY valid JSON.
                 "content": user_prompt
             }
         ],
-        temperature=OPENAI_TEMPERATURE
+        # temperature=OPENAI_TEMPERATURE
     )
 
     # ========================================================
@@ -415,14 +415,9 @@ def add_scores(
     similarity_result
 ):
     """
-    Adds ONLY:
+    Adds score to objects inside search_results.
 
-        "score": "92% match"
-
-    to objects containing pcm_inv_notif.
-
-    Every other existing field and value
-    remains unchanged.
+    Original JSON structure is preserved.
     """
 
     score_map = {}
@@ -487,51 +482,76 @@ def add_scores(
         # "92% match"
         # ----------------------------------------------------
 
-        formatted_score = (
-            f"{score}% match"
-        )
+        # formatted_score = (
+        #     f"{score}% match"
+        # )
 
         score_map[
             str(notification_id)
-        ] = formatted_score
+        ] = f"{score}% match"
 
     # --------------------------------------------------------
     # Create final JSON
     # --------------------------------------------------------
 
-    final_data = []
+    final_data = dict(original_data)
 
-    for item in original_data:
+    #------------------------------------------------------------
+    # UPDATE SEARCH RESULTS
+    #------------------------------------------------------------
+
+    update_search_results = []
+
+    for item in original_data.get("search_results",[]):
 
         # Preserve complete original object
         updated_item = dict(item)
-
-        # Only notification objects are touched
-        if "pcm_inv_notif" in updated_item:
-
-            notification_id = updated_item.get(
-                "pcm_inv_notif_id"
-            )
-
-            if notification_id is not None:
-
-                notification_id = str(
-                    notification_id
-                )
-
-                if notification_id in score_map:
-
-                    updated_item["score"] = (
-                        score_map[
-                            notification_id
-                        ]
-                    )
-
-        final_data.append(
-            updated_item
+        notification_id = updated_item.get(
+            "pcm_inv_notif_id"
         )
 
+        if notification_id is not None:
+            notification_id = str(
+                notification_id
+            )
+            if notification_id in score_map:
+                updated_item["score"] = (
+                    score_map[notification_id]
+                )
+        update_search_results.append(updated_item)
+
+    final_data["search_results"] = (
+        update_search_results
+    )
+
     return final_data
+
+    #     # Only notification objects are touched
+    #     if "pcm_inv_notif" in updated_item:
+
+    #         notification_id = updated_item.get(
+    #             "pcm_inv_notif_id"
+    #         )
+
+    #         if notification_id is not None:
+
+    #             notification_id = str(
+    #                 notification_id
+    #             )
+
+    #             if notification_id in score_map:
+
+    #                 updated_item["score"] = (
+    #                     score_map[
+    #                         notification_id
+    #                     ]
+    #                 )
+
+    #     final_data.append(
+    #         updated_item
+    #     )
+
+    # return final_data
 
 
 # ============================================================
@@ -541,6 +561,13 @@ def add_scores(
 def process_data(incoming_data):
     """
     Main reusable business function.
+
+    Supports input JSON in this format:
+    {
+        "search_results: [....],
+        "pcm_issue_summary": "....",
+        ....
+    }
 
     Returns:
 
@@ -561,33 +588,55 @@ def process_data(incoming_data):
 
     if not isinstance(
         incoming_data,
-        list
+        dict
     ):
 
         raise ValueError(
             "Input JSON must be a list of objects."
         )
 
+    #---------------------------------------------------------------
+    # GET SEARCH RESULTS
+    #---------------------------------------------------------------
+
+    search_results = incoming_data.get("search_results")
+
+    if not isinstance(search_results, list):
+        raise ValueError(
+            "'search_results' must be a list."
+        )
+
     # --------------------------------------------------------
     # Find current issue
     # --------------------------------------------------------
 
-    issue_summary = find_issue_summary(
-        incoming_data
-    )
+    issue_summary = incoming_data.get("pcm_issue_summary")
+
+    if issue_summary is None:
+        raise ValueError(
+            "No 'pcm_issue_summary' found in input JSON."
+        )
+
+    issue_summary = str(issue_summary).strip()
+
+    if not issue_summary:
+        raise ValueError(
+            "'pcm_issue_summary' cannot be empty."
+        )
 
     # --------------------------------------------------------
     # Find historical notifications
     # --------------------------------------------------------
 
     notifications = find_notifications(
-        incoming_data
+        search_results
     )
 
     if not notifications:
 
         raise ValueError(
             "No 'pcm_inv_notif' records found."
+            "inside 'search_results'."
         )
 
     # --------------------------------------------------------
@@ -679,9 +728,9 @@ def main():
         f"Model       : {OPENAI_MODEL}"
     )
 
-    print(
-        f"Temperature : {OPENAI_TEMPERATURE}"
-    )
+    # print(
+    #     f"Temperature : {OPENAI_TEMPERATURE}"
+    # )
 
     # --------------------------------------------------------
     # Input / Output files
@@ -759,7 +808,7 @@ def main():
 
     print(
         f"Number of notifications : "
-        f"{len(find_notifications(incoming_data))}"
+        f"{len(find_notifications(incoming_data.get('search_results',[])))}"
     )
 
     print(
