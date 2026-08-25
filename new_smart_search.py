@@ -9,36 +9,23 @@ from openai import OpenAI
 
 
 # ============================================================
-# LOAD ENVIRONMENT
+# CONFIG
 # ============================================================
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+API_KEY = os.getenv("OPENAI_API_KEY")
+BASE_URL = os.getenv("OPENAI_BASE_URL")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+
+if not API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is missing in .env")
 
 
-# ============================================================
-# VALIDATE CONFIG
-# ============================================================
+client_config = {"api_key": API_KEY}
 
-if not OPENAI_API_KEY:
-    raise RuntimeError(
-        "OPENAI_API_KEY is not configured in .env file."
-    )
-
-
-# ============================================================
-# OPENAI CLIENT
-# ============================================================
-
-client_config = {
-    "api_key": OPENAI_API_KEY
-}
-
-if OPENAI_BASE_URL:
-    client_config["base_url"] = OPENAI_BASE_URL
+if BASE_URL:
+    client_config["base_url"] = BASE_URL
 
 client = OpenAI(**client_config)
 
@@ -48,604 +35,400 @@ client = OpenAI(**client_config)
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are a HIGH-PRECISION semantic similarity evaluator.
+You are a high-precision semantic similarity evaluator.
 
-Your task is ONLY to compare:
+Your task is to compare ONE CURRENT ISSUE SUMMARY against
+MULTIPLE HISTORICAL NOTIFICATIONS.
 
-CURRENT ISSUE SUMMARY
+Return one score for EVERY notification.
 
-against
-
-ONE HISTORICAL NOTIFICATION.
-
-This is NOT keyword matching.
-
-This is NOT category matching.
-
-This is NOT medical diagnosis.
-
-You must determine how much of the actual problem meaning
-is shared between the two texts.
+The score represents semantic relevance between the complete
+meaning of the current issue and the complete meaning of the
+historical notification.
 
 ============================================================
-MOST IMPORTANT RULE
+IMPORTANT: GENERIC VS SPECIFIC INFORMATION
 ============================================================
 
-GENERIC CATEGORY MUST NOT DOMINATE THE SCORE.
+A notification can contain:
 
-Many records may contain the same generic phrase.
+1. Generic information
+2. Specific technical/problem information
 
 Example:
 
+"damaged material (damaged lead screw)"
+
+Generic:
+"damaged material"
+
+Specific:
+"damaged lead screw"
+
+The generic part should NOT dominate the score.
+
+However, do NOT completely ignore the generic part either.
+
+Use the COMPLETE TEXT.
+
+============================================================
+CRITICAL GENERIC CASE
+============================================================
+
+Current issue:
+
+"damaged material"
+
+Historical notifications:
+
+"damaged material (misaligned hook talons)"
+"damaged material (soldering issues)"
+"damaged material (high SMA wire resistance)"
+"damaged material (damaged lead screw)"
+
+The current issue is generic-only.
+
+Therefore:
+
+- Do NOT assume that any specific historical subtype is the
+  actual current problem.
+- Do NOT give these records 90+ merely because they contain
+  "damaged material".
+- BUT also do NOT force every record to exactly the same score.
+- Evaluate the complete semantic content of each notification.
+- Preserve meaningful differences in semantic closeness.
+- Generic category similarity contributes to relevance.
+- Specific information refines the score.
+
+The goal is RELATIVE semantic relevance, not keyword counting.
+
+============================================================
+VERY IMPORTANT: DO NOT FLATTEN SCORES
+============================================================
+
+Do NOT return:
+
+25, 25, 25, 25
+
+just because all notifications contain the same generic phrase.
+
+If the complete meanings have different semantic closeness,
+their scores should be different.
+
+For example, a reasonable result may look like:
+
+65
+61
+68
+73
+
+rather than:
+
+25
+25
+25
+25
+
+Exact values are your judgement.
+
+============================================================
+SPECIFIC MATCH
+============================================================
+
+If both records contain the same specific problem:
+
 Current:
-"damaged material"
-
-Historical:
-"damaged material (battery corrosion)"
-
-Historical:
-"damaged material (extra spring)"
-
-Historical:
-"damaged material (ratchet gear)"
-
-Historical:
 "damaged material (soldering issue)"
 
-The phrase:
-
-"damaged material"
-
-is GENERIC.
-
-It does NOT identify the actual failure/problem.
-
-The historical records contain specific information:
-
-battery corrosion
-extra spring
-ratchet gear
-soldering issue
-
-The current issue does NOT contain any of those specific details.
-
-Therefore, NONE of these records should receive a high score.
-
-============================================================
-GENERIC-ONLY CURRENT ISSUE
-============================================================
-
-This is a CRITICAL RULE.
-
-If the current issue contains only a generic category such as:
-
-"damaged material"
-
-then a historical notification containing:
-
-"damaged material (battery corrosion)"
-
-must NOT receive 50%, 60%, 70%, 80%, 90% or 100%.
-
-The correct interpretation is:
-
-The category is related, but the actual problem is unknown.
-
-Therefore use LOW similarity.
-
-CALIBRATION:
-
-Generic category only:
-approximately 20-35
-
-Generic category + unrelated/different specific subtype:
-approximately 15-30
-
-Generic category + same specific subtype:
-HIGH ONLY if the current issue actually contains
-that same specific information.
-
-Do NOT invent missing information.
-
-============================================================
-EXAMPLE 1
-============================================================
-
-CURRENT:
-
-"damaged material"
-
-HISTORICAL:
-
-"damaged material (battery corrosion)"
-
-Score should be LOW.
-
-Reason:
-
-Both mention damaged material, but current issue does not
-specify battery corrosion.
-
-Do NOT assume battery corrosion is the issue.
-
-============================================================
-EXAMPLE 2
-============================================================
-
-CURRENT:
-
-"damaged material"
-
-HISTORICAL:
-
-"damaged material (soldering issue)"
-
-Score should be LOW.
-
-The common phrase is generic.
-
-The specific soldering problem is not present in the
-current issue.
-
-============================================================
-EXAMPLE 3
-============================================================
-
-CURRENT:
-
-"damaged material (soldering issue)"
-
-HISTORICAL:
-
+Historical:
 "damaged material (soldering problem)"
 
-Score should be VERY HIGH.
+=> HIGH score.
 
-The generic category matches AND the specific problem
-has the same meaning.
+If specific problems are different:
 
-============================================================
-EXAMPLE 4
-============================================================
-
-CURRENT:
-
+Current:
 "damaged material (soldering issue)"
 
-HISTORICAL:
-
+Historical:
 "damaged material (battery corrosion)"
 
-Score should be LOW.
+=> LOW/MODERATE score.
 
-The generic category matches but the specific failure
-is different.
-
-============================================================
-EXAMPLE 5
-============================================================
-
-CURRENT:
-
-"high SMA wire resistance"
-
-HISTORICAL:
-
-"SMA wire has high resistance"
-
-Score should be VERY HIGH.
-
-These have the same specific technical meaning.
+The shared generic phrase alone is not enough for a high score.
 
 ============================================================
-SPECIFICITY HAS PRIORITY
-============================================================
-
-When comparing two records, identify:
-
-1. Generic category
-2. Specific problem
-3. Affected component
-4. Failure mode
-5. Cause
-6. Symptom
-7. Technical condition
-8. Other distinctive technical information
-
-Specific information is much more important than generic
-information.
-
-If specific information conflicts, similarity should be LOW
-even when the generic category is identical.
-
-============================================================
-SCORING CALIBRATION
-============================================================
-
-95-100
-Almost identical complete meaning and same specific issue.
-
-85-94
-Very strong semantic match with the same specific issue.
-
-70-84
-Strong semantic match with closely related specific issue.
-
-50-69
-Moderate similarity ONLY when meaningful specific information
-is shared.
-
-30-49
-Weak relationship or partially shared information.
-
-20-29
-Generic/context relationship but no meaningful specific match.
-
-10-19
-Very weak relationship.
-
-0-9
-Essentially unrelated.
-
-IMPORTANT:
-
-Do NOT automatically use 50 as a default score.
-
-Do NOT give the same score to every notification simply because
-they share the same generic phrase.
-
-============================================================
-GENERIC-ONLY CURRENT SCORE RULE
-============================================================
-
-If CURRENT ISSUE SUMMARY is generic-only, for example:
-
-"damaged material"
-
-and HISTORICAL NOTIFICATION is:
-
-"damaged material (battery corrosion)"
-
-then score should normally remain in approximately:
-
-20-35
-
-range.
-
-If the historical notification has a completely different
-specific subtype, prefer the lower part of that range.
-
-If the historical notification is also only:
-
-"damaged material"
-
-then it may receive a somewhat higher generic match,
-but still do NOT treat it as a 90+ specific match.
-
-============================================================
-SEMANTIC MATCHING
+SEMANTIC UNDERSTANDING
 ============================================================
 
 Understand:
 
 - synonyms
 - paraphrases
-- abbreviations
 - technical terminology
-- equivalent phrases
+- abbreviations
+- equivalent descriptions
 - word order
-- grammatical differences
-- singular/plural differences
+- grammar
 - complete technical meaning
 
 Example:
 
-"high resistance in SMA wire"
+"high SMA wire resistance"
 
 and
 
-"SMA wire resistance is high"
+"SMA wire has high resistance"
 
 are highly similar.
 
-But:
-
-"damaged material (soldering issue)"
-
-and
-
-"damaged material (battery corrosion)"
-
-are NOT highly similar.
-
 ============================================================
-DO NOT INVENT INFORMATION
+SCORING GUIDELINES
 ============================================================
 
-Only use information explicitly present in the texts.
+95-100:
+Almost identical complete meaning.
 
-If current issue does not mention:
+85-94:
+Very strong semantic match.
 
-battery
-soldering
-lead screw
-ratchet
-spring
-sensor
-etc.
+70-84:
+Strong semantic match.
 
-DO NOT assume that any of these are the current issue.
+55-69:
+Moderate-to-strong semantic relationship.
+
+40-54:
+Moderate relationship.
+
+25-39:
+Weak relationship / mostly generic relationship.
+
+10-24:
+Very weak relationship.
+
+0-9:
+Essentially unrelated.
+
+IMPORTANT:
+
+These are guidelines, NOT fixed buckets.
+
+Do not automatically assign the same score to records in
+the same category.
+
+Do not automatically assign 25%.
 
 ============================================================
-BLANK / MISSING NOTIFICATION
+EMBEDDING-LIKE RELATIVE BEHAVIOUR
 ============================================================
 
-If historical notification is:
+The historical records may all share a generic phrase.
+
+Still compare their complete text and preserve relative
+semantic closeness.
+
+If one notification is semantically closer to the current
+issue than another, its score should normally be higher.
+
+The purpose is to produce a meaningful relevance ranking.
+
+Do NOT try to reproduce a specific embedding cosine value.
+
+For example:
+
+Embedding scores:
+
+0.64
+0.64
+0.67
+0.73
+
+The LLM does NOT need to output exactly:
+
+64
+64
+67
+73
+
+But it should preserve meaningful relative differences when
+the text supports them.
+
+============================================================
+MISSING INFORMATION
+============================================================
+
+Never invent information.
+
+If the current issue does not mention a specific component,
+do not assume that component is the current problem.
+
+============================================================
+BLANK NOTIFICATIONS
+============================================================
+
+If pcm_inv_notif is:
 
 null
-
 ""
-
 whitespace
+or missing completely
 
-or the field is missing,
-
-the score MUST be exactly:
-
-0
+the score MUST be exactly 0.
 
 Do not fail.
-
-Do not generate an error.
 
 ============================================================
 OUTPUT
 ============================================================
 
-Return ONLY valid JSON.
-
-Required format:
+Return ONLY valid JSON:
 
 {
-    "score": 27
+    "results": [
+        {
+            "pcm_inv_notif_id": "123",
+            "score": 72
+        }
+    ]
 }
 
-The score must be an integer from 0 to 100.
+Rules:
 
-Do not return:
-
-%
-explanation
-reason
-markdown
-additional fields
-additional text
-
-============================================================
-FINAL INTERNAL CHECK
-============================================================
-
-Before returning the score verify:
-
-1. Did I compare actual meaning?
-2. Did I identify generic vs specific information?
-3. Did I avoid generic keyword dominance?
-4. Did I avoid inventing missing information?
-5. If current issue is generic-only, did I keep score low?
-6. If specific problems are different, did I keep score low?
-7. If specific problems are equivalent, did I give high score?
-8. Is the score between 0 and 100?
-
-Return ONLY:
-
-{
-    "score": integer
-}
+- one result for every notification
+- preserve exact notification ID
+- score must be integer 0-100
+- blank/missing notification = 0
+- no explanation
+- no markdown
+- no additional fields
 """
 
 
 # ============================================================
-# TEXT NORMALIZATION
+# HELPERS
 # ============================================================
 
-def normalize_text(text):
-    """
-    Normalize text for internal processing only.
-    Original JSON is never modified.
-    """
-
+def normalize(text):
     if text is None:
         return ""
 
-    text = str(text).strip()
-
-    text = re.sub(
+    return re.sub(
         r"\s+",
         " ",
-        text
+        str(text).strip()
     )
 
-    return text
 
+def load_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-# ============================================================
-# VALIDATE INPUT
-# ============================================================
+    except FileNotFoundError:
+        raise RuntimeError(f"Input file not found: {path}")
 
-def validate_input_data(data):
-
-    if not isinstance(data, dict):
-        raise ValueError(
-            "Input JSON must be a JSON object."
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Invalid JSON: {e}"
         )
 
-    if "search_results" not in data:
-        raise ValueError(
-            "'search_results' is missing."
-        )
 
-    if not isinstance(
-        data["search_results"],
-        list
-    ):
-        raise ValueError(
-            "'search_results' must be a list."
-        )
-
-    if "pcm_issue_summary" not in data:
-        raise ValueError(
-            "'pcm_issue_summary' is missing."
-        )
-
-    issue_summary = normalize_text(
-        data.get("pcm_issue_summary")
-    )
-
-    if not issue_summary:
-        raise ValueError(
-            "'pcm_issue_summary' cannot be empty."
+def save_json(data, path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            data,
+            f,
+            indent=4,
+            ensure_ascii=False
         )
 
 
 # ============================================================
-# FIND NOTIFICATIONS
+# EXTRACT NOTIFICATIONS
 # ============================================================
 
-def find_notifications(search_results):
+def get_notifications(search_results):
 
     notifications = []
 
     for index, item in enumerate(search_results):
 
         if not isinstance(item, dict):
-
-            print(
-                f"WARNING: search_results[{index}] "
-                f"is not an object. Skipping."
-            )
-
-            continue
-
-        notification_id = item.get(
-            "pcm_inv_notif_id"
-        )
-
-        if notification_id is None:
-
             print(
                 f"COMMENT: search_results[{index}] "
-                f"has no pcm_inv_notif_id. "
-                f"Cannot assign score."
+                f"is invalid. Skipping."
             )
-
-            notifications.append({
-                "index": index,
-                "pcm_inv_notif_id": None,
-                "pcm_inv_notif": "",
-                "missing_notification": True,
-                "missing_id": True
-            })
-
             continue
 
-        notification_id = str(
-            notification_id
-        ).strip()
+        notif_id = item.get("pcm_inv_notif_id")
 
-        if not notification_id:
+        if notif_id is not None:
+            notif_id = normalize(notif_id)
 
-            print(
-                f"COMMENT: search_results[{index}] "
-                f"has blank pcm_inv_notif_id."
-            )
-
-            notifications.append({
-                "index": index,
-                "pcm_inv_notif_id": None,
-                "pcm_inv_notif": "",
-                "missing_notification": True,
-                "missing_id": True
-            })
-
-            continue
-
-        # ----------------------------------------------------
-        # Get notification
-        # ----------------------------------------------------
-
-        if "pcm_inv_notif" not in item:
-
-            print(
-                f"COMMENT: Notification missing for ID "
-                f"{notification_id}. Score = 0."
-            )
-
-            notifications.append({
-                "index": index,
-                "pcm_inv_notif_id": notification_id,
-                "pcm_inv_notif": "",
-                "missing_notification": True,
-                "missing_id": False
-            })
-
-            continue
-
-        notification = normalize_text(
+        text = normalize(
             item.get("pcm_inv_notif")
         )
 
-        if not notification:
-
-            print(
-                f"COMMENT: Notification blank for ID "
-                f"{notification_id}. Score = 0."
-            )
-
-            notifications.append({
-                "index": index,
-                "pcm_inv_notif_id": notification_id,
-                "pcm_inv_notif": "",
-                "missing_notification": True,
-                "missing_id": False
-            })
-
-            continue
-
         notifications.append({
             "index": index,
-            "pcm_inv_notif_id": notification_id,
-            "pcm_inv_notif": notification,
-            "missing_notification": False,
-            "missing_id": False
+            "id": notif_id,
+            "text": text,
+            "missing": not bool(text)
         })
+
+        if not text:
+            print(
+                f"COMMENT: Notification missing/blank "
+                f"for ID {notif_id}. Score = 0."
+            )
 
     return notifications
 
 
 # ============================================================
-# CALCULATE ONE NOTIFICATION SCORE
+# LLM SIMILARITY
 # ============================================================
 
-def calculate_one_score(
+def calculate_similarity(
     issue_summary,
-    notification
+    notifications
 ):
-    """
-    Calculate similarity for ONE notification.
 
-    Important:
-    Every notification gets its own LLM evaluation.
-    This prevents score anchoring caused by multiple
-    notifications sharing the same generic phrase.
-    """
+    valid_notifications = [
+        x for x in notifications
+        if x["text"] and x["id"]
+    ]
 
     # --------------------------------------------------------
-    # Blank notification = ZERO
+    # If nothing valid exists, no LLM call required
     # --------------------------------------------------------
 
-    if not notification:
+    if not valid_notifications:
 
-        return 0, 0.0
+        return {
+            "results": [
+                {
+                    "pcm_inv_notif_id": x["id"],
+                    "score": 0
+                }
+                for x in notifications
+                if x["id"]
+            ]
+        }, 0.0
+
+    # --------------------------------------------------------
+    # Prepare records
+    # --------------------------------------------------------
+
+    records = []
+
+    for x in valid_notifications:
+
+        records.append({
+            "pcm_inv_notif_id": x["id"],
+            "pcm_inv_notif": x["text"]
+        })
 
     user_prompt = f"""
 CURRENT ISSUE SUMMARY:
@@ -653,45 +436,55 @@ CURRENT ISSUE SUMMARY:
 {issue_summary}
 
 
-HISTORICAL NOTIFICATION:
+HISTORICAL NOTIFICATIONS:
 
-{notification}
+{json.dumps(
+    records,
+    indent=2,
+    ensure_ascii=False
+)}
 
 
 TASK:
 
-Calculate the semantic similarity between the current issue
-summary and this ONE historical notification.
+Evaluate EVERY historical notification independently against
+the current issue.
 
-Remember:
+Then calibrate the scores across the complete set so that
+meaningful differences between notifications are preserved.
 
-- Generic category is NOT the actual problem.
-- Specific technical meaning is more important.
-- Shared phrase such as "damaged material" alone must NOT
-  create a high similarity.
-- If current issue is only "damaged material", and the
-  historical notification contains a specific subtype such as
-  battery corrosion, extra spring, ratchet gear, sensor issue,
-  electrical failure, soldering issue, lead screw damage etc.,
-  the score must remain LOW.
-- Do not invent the missing subtype in the current issue.
-- If the specific problem meanings are equivalent, score high.
-- If specific problem meanings are different, score low.
+IMPORTANT:
 
-Return ONLY:
+If the current issue is:
 
-{{
-    "score": integer
-}}
+"damaged material"
+
+and notifications contain:
+
+"damaged material (misaligned hook talons)"
+"damaged material (soldering issues)"
+"damaged material (high SMA wire resistance)"
+"damaged material (damaged lead screw)"
+
+do NOT return identical scores simply because
+"damaged material" is repeated.
+
+The generic category should contribute to similarity, while
+the complete notification text should refine the score.
+
+Do not assume any specific subtype is the actual current issue.
+
+Return one score for every notification.
+
+Return ONLY JSON.
 """
 
-    start_time = time.perf_counter()
+    start = time.perf_counter()
 
     try:
 
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-
+            model=MODEL,
             messages=[
                 {
                     "role": "system",
@@ -702,301 +495,113 @@ Return ONLY:
                     "content": user_prompt
                 }
             ],
-
             response_format={
                 "type": "json_object"
             }
         )
 
-    except Exception as error:
+    except Exception as e:
 
         raise RuntimeError(
-            f"LLM API call failed: {error}"
-        ) from error
-
-    end_time = time.perf_counter()
-
-    response_time = (
-        end_time - start_time
-    )
-
-    # --------------------------------------------------------
-    # Extract content
-    # --------------------------------------------------------
-
-    try:
-
-        content = (
-            response
-            .choices[0]
-            .message
-            .content
+            f"LLM API call failed: {e}"
         )
 
-    except Exception as error:
+    llm_time = time.perf_counter() - start
 
-        raise RuntimeError(
-            "Unable to extract LLM response."
-        ) from error
+    # --------------------------------------------------------
+    # Read response
+    # --------------------------------------------------------
+
+    content = (
+        response
+        .choices[0]
+        .message
+        .content
+    )
 
     if not content:
-
         raise RuntimeError(
             "LLM returned empty response."
         )
 
     content = content.strip()
 
-    # --------------------------------------------------------
-    # Remove markdown if accidentally returned
-    # --------------------------------------------------------
+    # Remove accidental markdown fences
+    content = re.sub(
+        r"^```(?:json)?",
+        "",
+        content,
+        flags=re.IGNORECASE
+    )
 
-    if content.startswith("```"):
-
-        content = re.sub(
-            r"^```(?:json)?",
-            "",
-            content,
-            flags=re.IGNORECASE
-        )
-
-        content = re.sub(
-            r"```$",
-            "",
-            content
-        )
-
-        content = content.strip()
-
-    # --------------------------------------------------------
-    # Parse JSON
-    # --------------------------------------------------------
+    content = re.sub(
+        r"```$",
+        "",
+        content
+    ).strip()
 
     try:
-
         result = json.loads(content)
 
-    except json.JSONDecodeError as error:
+    except json.JSONDecodeError as e:
 
         raise RuntimeError(
-            "LLM returned invalid JSON.\n"
-            f"Response: {content}"
-        ) from error
-
-    # --------------------------------------------------------
-    # Validate score
-    # --------------------------------------------------------
+            f"Invalid JSON returned by LLM:\n{content}"
+        ) from e
 
     if not isinstance(result, dict):
-
         raise RuntimeError(
-            "LLM result must be a JSON object."
+            "LLM response must be an object."
         )
 
-    score = result.get("score")
+    results = result.get("results")
 
-    if score is None:
-
+    if not isinstance(results, list):
         raise RuntimeError(
-            "LLM response does not contain score."
+            "LLM response must contain 'results' list."
         )
 
-    try:
+    # --------------------------------------------------------
+    # Validate IDs and scores
+    # --------------------------------------------------------
 
-        score = float(score)
+    expected_ids = {
+        x["id"]
+        for x in valid_notifications
+    }
 
-    except (
-        TypeError,
-        ValueError
-    ):
+    received = {}
 
-        raise RuntimeError(
-            f"Invalid score returned by LLM: {score}"
-        )
+    for item in results:
 
-    if score < 0 or score > 100:
-
-        raise RuntimeError(
-            f"LLM score outside valid range: {score}"
-        )
-
-    score = int(round(score))
-
-    return score, response_time
-
-
-# ============================================================
-# CALCULATE ALL SCORES
-# ============================================================
-
-def calculate_similarity(
-    issue_summary,
-    notifications
-):
-    """
-    Calculate similarity for every notification.
-
-    Blank/missing notifications receive 0 without
-    calling the LLM.
-
-    Valid notifications are evaluated independently.
-    """
-
-    results = []
-
-    total_llm_time = 0.0
-
-    valid_count = 0
-    missing_count = 0
-
-    for number, item in enumerate(
-        notifications,
-        start=1
-    ):
-
-        notification_id = (
-            item["pcm_inv_notif_id"]
-        )
-
-        notification = (
-            item["pcm_inv_notif"]
-        )
-
-        print("\n")
-        print("-" * 70)
-
-        print(
-            f"Processing {number}/"
-            f"{len(notifications)}"
-        )
-
-        print(
-            f"ID: {notification_id}"
-        )
-
-        # ----------------------------------------------------
-        # Missing / blank
-        # ----------------------------------------------------
-
-        if item["missing_notification"]:
-
-            print(
-                "COMMENT: Notification is blank/missing."
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                "Invalid result object returned by LLM."
             )
 
-            print(
-                "Score: 0% match"
+        notif_id = normalize(
+            item.get("pcm_inv_notif_id")
+        )
+
+        if not notif_id:
+            raise RuntimeError(
+                "LLM returned result without notification ID."
             )
 
-            results.append({
-                "pcm_inv_notif_id":
-                    notification_id,
+        if notif_id not in expected_ids:
+            raise RuntimeError(
+                f"Unexpected notification ID: {notif_id}"
+            )
 
-                "score":
-                    0
-            })
-
-            missing_count += 1
-
-            continue
-
-        # ----------------------------------------------------
-        # Valid notification
-        # ----------------------------------------------------
-
-        print(
-            f"Notification: {notification}"
-        )
-
-        score, response_time = calculate_one_score(
-            issue_summary=issue_summary,
-            notification=notification
-        )
-
-        total_llm_time += response_time
-
-        valid_count += 1
-
-        results.append({
-            "pcm_inv_notif_id":
-                notification_id,
-
-            "score":
-                score
-        })
-
-        print(
-            f"Score: {score}% match"
-        )
-
-        print(
-            f"LLM time: {response_time:.3f} seconds"
-        )
-
-    print("\n")
-    print("=" * 70)
-    print("SIMILARITY PROCESSING SUMMARY")
-    print("=" * 70)
-
-    print(
-        f"Total notifications : {len(notifications)}"
-    )
-
-    print(
-        f"Valid notifications  : {valid_count}"
-    )
-
-    print(
-        f"Blank/missing        : {missing_count}"
-    )
-
-    print(
-        f"Total LLM time       : "
-        f"{total_llm_time:.3f} seconds"
-    )
-
-    print("=" * 70)
-
-    return {
-        "results": results
-    }, total_llm_time
-
-
-# ============================================================
-# ADD SCORES TO ORIGINAL JSON
-# ============================================================
-
-def add_scores(
-    original_data,
-    similarity_result
-):
-
-    score_map = {}
-
-    for result in similarity_result.get(
-        "results",
-        []
-    ):
-
-        notification_id = result.get(
-            "pcm_inv_notif_id"
-        )
-
-        score = result.get(
-            "score"
-        )
-
-        if notification_id is None:
-            continue
-
-        if score is None:
-            continue
+        if notif_id in received:
+            raise RuntimeError(
+                f"Duplicate notification ID: {notif_id}"
+            )
 
         try:
-
             score = int(
                 round(
-                    float(score)
+                    float(item.get("score"))
                 )
             )
 
@@ -1005,29 +610,80 @@ def add_scores(
             ValueError
         ):
 
-            score = 0
-
-        score = max(
-            0,
-            min(
-                100,
-                score
+            raise RuntimeError(
+                f"Invalid score for {notif_id}"
             )
+
+        if not 0 <= score <= 100:
+            raise RuntimeError(
+                f"Score out of range for {notif_id}: {score}"
+            )
+
+        received[notif_id] = score
+
+    # --------------------------------------------------------
+    # Make sure every valid notification got score
+    # --------------------------------------------------------
+
+    missing = expected_ids - set(received)
+
+    if missing:
+        raise RuntimeError(
+            f"LLM missed notification IDs: {missing}"
         )
 
-        score_map[
-            str(notification_id)
-        ] = f"{score}% match"
-
     # --------------------------------------------------------
-    # Preserve original JSON
+    # Rebuild results in ORIGINAL order
     # --------------------------------------------------------
 
-    final_data = dict(
-        original_data
-    )
+    final_results = []
 
-    updated_search_results = []
+    for x in notifications:
+
+        notif_id = x["id"]
+
+        if not notif_id:
+            continue
+
+        if x["missing"]:
+
+            score = 0
+
+        else:
+
+            score = received.get(
+                notif_id,
+                0
+            )
+
+        final_results.append({
+            "pcm_inv_notif_id": notif_id,
+            "score": score
+        })
+
+    return {
+        "results": final_results
+    }, llm_time
+
+
+# ============================================================
+# ADD SCORE TO ORIGINAL JSON
+# ============================================================
+
+def add_scores(
+    original_data,
+    similarity_result
+):
+
+    score_map = {
+        str(x["pcm_inv_notif_id"]): int(x["score"])
+        for x in similarity_result["results"]
+        if x.get("pcm_inv_notif_id") is not None
+    }
+
+    output = dict(original_data)
+
+    updated = []
 
     for item in original_data.get(
         "search_results",
@@ -1035,364 +691,118 @@ def add_scores(
     ):
 
         if not isinstance(item, dict):
-
-            updated_search_results.append(
-                item
-            )
-
+            updated.append(item)
             continue
 
-        updated_item = {}
-
-        notification_id = item.get(
-            "pcm_inv_notif_id"
+        item_copy = {}
+        notif_id = normalize(
+            item.get("pcm_inv_notif_id")
         )
 
-        if notification_id is not None:
-
-            notification_id = str(
-                notification_id
-            ).strip()
-
-        score_value = score_map.get(
-            notification_id,
-            "0% match"
+        score = score_map.get(
+            notif_id,
+            0
         )
 
-        # ----------------------------------------------------
-        # Preserve original order
-        # ----------------------------------------------------
-
-        score_inserted = False
+        inserted = False
 
         for key, value in item.items():
 
-            updated_item[key] = value
+            item_copy[key] = value
 
             if (
                 key == "pcm_inv_notif"
-                and not score_inserted
+                and not inserted
             ):
 
-                updated_item["score"] = (
-                    score_value
+                item_copy["score"] = (
+                    f"{score}% match"
                 )
 
-                score_inserted = True
+                inserted = True
 
-        # ----------------------------------------------------
-        # If pcm_inv_notif itself is missing
-        # ----------------------------------------------------
+        if not inserted:
 
-        if not score_inserted:
-
-            updated_item["score"] = (
-                score_value
+            item_copy["score"] = (
+                f"{score}% match"
             )
 
-        updated_search_results.append(
-            updated_item
-        )
+        updated.append(item_copy)
 
-    final_data[
-        "search_results"
-    ] = updated_search_results
+    output["search_results"] = updated
 
-    return final_data
+    return output
 
 
 # ============================================================
-# PROCESS DATA
+# MAIN PROCESS
 # ============================================================
 
-def process_data(
-    incoming_data
-):
+def process(data):
 
-    total_start_time = time.perf_counter()
-
-    # --------------------------------------------------------
-    # Validate
-    # --------------------------------------------------------
-
-    validate_input_data(
-        incoming_data
-    )
-
-    issue_summary = normalize_text(
-        incoming_data.get(
-            "pcm_issue_summary"
+    if not isinstance(data, dict):
+        raise ValueError(
+            "Input JSON must be an object."
         )
+
+    issue_summary = normalize(
+        data.get("pcm_issue_summary")
     )
 
-    search_results = incoming_data.get(
+    if not issue_summary:
+        raise ValueError(
+            "pcm_issue_summary is missing/empty."
+        )
+
+    search_results = data.get(
         "search_results"
     )
 
-    # --------------------------------------------------------
-    # Find notifications
-    # --------------------------------------------------------
+    if not isinstance(
+        search_results,
+        list
+    ):
+        raise ValueError(
+            "search_results must be a list."
+        )
 
-    notifications = find_notifications(
+    notifications = get_notifications(
         search_results
     )
 
-    print("\n")
-    print("=" * 70)
-    print("INPUT ANALYSIS")
-    print("=" * 70)
-
-    print(
-        f"Current issue summary : {issue_summary}"
-    )
-
-    print(
-        f"Total search records  : "
-        f"{len(search_results)}"
-    )
-
-    print(
-        f"Notification records  : "
-        f"{len(notifications)}"
-    )
-
-    missing_count = sum(
-        1
-        for item in notifications
-        if item["missing_notification"]
-    )
-
-    print(
-        f"Blank/missing notif   : "
-        f"{missing_count}"
-    )
-
+    print("\n" + "=" * 70)
+    print("INPUT")
     print("=" * 70)
 
-    # --------------------------------------------------------
-    # No search results
-    # --------------------------------------------------------
+    print(
+        f"Issue Summary : {issue_summary}"
+    )
 
-    if not notifications:
-
-        print(
-            "COMMENT: No notification records found."
-        )
-
-        final_result = add_scores(
-            original_data=incoming_data,
-
-            similarity_result={
-                "results": []
-            }
-        )
-
-        total_end_time = time.perf_counter()
-
-        return (
-            final_result,
-            0.0,
-            total_end_time - total_start_time
-        )
+    print(
+        f"Records       : {len(notifications)}"
+    )
 
     # --------------------------------------------------------
-    # Check whether at least one valid notification exists
+    # LLM
     # --------------------------------------------------------
 
-    valid_notifications = [
-        item
-        for item in notifications
-        if not item["missing_notification"]
-    ]
-
-    # --------------------------------------------------------
-    # ALL notifications missing/blank
-    # --------------------------------------------------------
-
-    if not valid_notifications:
-
-        print("\n")
-        print(
-            "COMMENT: All notifications are blank/missing."
+    similarity_result, llm_time = (
+        calculate_similarity(
+            issue_summary,
+            notifications
         )
-
-        print(
-            "COMMENT: LLM call skipped."
-        )
-
-        print(
-            "COMMENT: All notification scores = 0."
-        )
-
-        similarity_result = {
-            "results": [
-                {
-                    "pcm_inv_notif_id":
-                        item["pcm_inv_notif_id"],
-
-                    "score":
-                        0
-                }
-
-                for item in notifications
-                if item["pcm_inv_notif_id"] is not None
-            ]
-        }
-
-        final_result = add_scores(
-            original_data=incoming_data,
-            similarity_result=similarity_result
-        )
-
-        total_end_time = time.perf_counter()
-
-        return (
-            final_result,
-            0.0,
-            total_end_time - total_start_time
-        )
-
-    # --------------------------------------------------------
-    # LLM similarity
-    # --------------------------------------------------------
-
-    (
-        similarity_result,
-        llm_response_time
-    ) = calculate_similarity(
-        issue_summary=issue_summary,
-        notifications=notifications
     )
 
     # --------------------------------------------------------
     # Add scores
     # --------------------------------------------------------
 
-    final_result = add_scores(
-        original_data=incoming_data,
-        similarity_result=similarity_result
+    output = add_scores(
+        data,
+        similarity_result
     )
 
-    # --------------------------------------------------------
-    # Total processing time
-    # --------------------------------------------------------
-
-    total_end_time = time.perf_counter()
-
-    total_processing_time = (
-        total_end_time
-        - total_start_time
-    )
-
-    return (
-        final_result,
-        llm_response_time,
-        total_processing_time
-    )
-
-
-# ============================================================
-# LOAD JSON
-# ============================================================
-
-def load_json_file(
-    file_path
-):
-
-    try:
-
-        with open(
-            file_path,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            return json.load(file)
-
-    except FileNotFoundError as error:
-
-        raise RuntimeError(
-            f"Input file not found: {file_path}"
-        ) from error
-
-    except json.JSONDecodeError as error:
-
-        raise RuntimeError(
-            f"Invalid JSON in file: {file_path}\n"
-            f"Error: {error}"
-        ) from error
-
-
-# ============================================================
-# SAVE JSON
-# ============================================================
-
-def save_json_file(
-    data,
-    file_path
-):
-
-    with open(
-        file_path,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            data,
-            file,
-            indent=4,
-            ensure_ascii=False
-        )
-
-
-# ============================================================
-# PRINT SCORE SUMMARY
-# ============================================================
-
-def print_score_summary(
-    final_result
-):
-
-    print("\n")
-    print("=" * 70)
-    print("SCORE SUMMARY")
-    print("=" * 70)
-
-    for item in final_result.get(
-        "search_results",
-        []
-    ):
-
-        notification_id = item.get(
-            "pcm_inv_notif_id",
-            "N/A"
-        )
-
-        notification = item.get(
-            "pcm_inv_notif",
-            ""
-        )
-
-        score = item.get(
-            "score",
-            "0% match"
-        )
-
-        print(
-            f"\nID    : {notification_id}"
-        )
-
-        print(
-            f"Text  : "
-            f"{notification or '[BLANK / MISSING]'}"
-        )
-
-        print(
-            f"Score : {score}"
-        )
-
-    print("=" * 70)
+    return output, llm_time
 
 
 # ============================================================
@@ -1400,14 +810,6 @@ def print_score_summary(
 # ============================================================
 
 def main():
-
-    print("=" * 70)
-    print("GENAI SEMANTIC SIMILARITY")
-    print("=" * 70)
-
-    print(
-        f"Model : {OPENAI_MODEL}"
-    )
 
     input_file = Path(
         "example_input.json"
@@ -1417,134 +819,75 @@ def main():
         "output.json"
     )
 
+    print("=" * 70)
+    print("GENAI SEMANTIC SIMILARITY")
+    print("=" * 70)
+
+    total_start = time.perf_counter()
+
+    data = load_json(
+        input_file
+    )
+
+    output, llm_time = process(
+        data
+    )
+
+    save_json(
+        output,
+        output_file
+    )
+
+    total_time = (
+        time.perf_counter()
+        - total_start
+    )
+
+    # --------------------------------------------------------
+    # PRINT SCORES
+    # --------------------------------------------------------
+
+    print("\n" + "=" * 70)
+    print("SCORES")
+    print("=" * 70)
+
+    for item in output.get(
+        "search_results",
+        []
+    ):
+
+        print(
+            f"{item.get('pcm_inv_notif_id')} "
+            f"-> {item.get('score', '0% match')}"
+        )
+
+    print("\n" + "=" * 70)
+    print("PERFORMANCE")
+    print("=" * 70)
+
     print(
-        f"Input  : {input_file}"
+        f"LLM response time : {llm_time:.3f} sec"
     )
 
     print(
-        f"Output : {output_file}"
+        f"Total time        : {total_time:.3f} sec"
     )
 
-    program_start_time = time.perf_counter()
+    print(
+        f"Output saved      : {output_file}"
+    )
 
-    try:
+    print("\n" + "=" * 70)
+    print("FINAL JSON")
+    print("=" * 70)
 
-        # ----------------------------------------------------
-        # Load
-        # ----------------------------------------------------
-
-        incoming_data = load_json_file(
-            input_file
+    print(
+        json.dumps(
+            output,
+            indent=4,
+            ensure_ascii=False
         )
-
-        # ----------------------------------------------------
-        # Process
-        # ----------------------------------------------------
-
-        (
-            final_result,
-            llm_response_time,
-            total_processing_time
-        ) = process_data(
-            incoming_data
-        )
-
-        # ----------------------------------------------------
-        # Save
-        # ----------------------------------------------------
-
-        save_json_file(
-            final_result,
-            output_file
-        )
-
-        # ----------------------------------------------------
-        # Program timer
-        # ----------------------------------------------------
-
-        program_end_time = time.perf_counter()
-
-        total_program_time = (
-            program_end_time
-            - program_start_time
-        )
-
-        # ----------------------------------------------------
-        # Performance
-        # ----------------------------------------------------
-
-        print("\n")
-        print("=" * 70)
-        print("PERFORMANCE")
-        print("=" * 70)
-
-        print(
-            f"Number of notifications : "
-            f"{len(final_result.get('search_results', []))}"
-        )
-
-        print(
-            f"LLM total response time : "
-            f"{llm_response_time:.3f} seconds"
-        )
-
-        print(
-            f"Total processing time   : "
-            f"{total_processing_time:.3f} seconds"
-        )
-
-        print(
-            f"Total program time      : "
-            f"{total_program_time:.3f} seconds"
-        )
-
-        print("=" * 70)
-
-        # ----------------------------------------------------
-        # Scores
-        # ----------------------------------------------------
-
-        print_score_summary(
-            final_result
-        )
-
-        # ----------------------------------------------------
-        # Final JSON
-        # ----------------------------------------------------
-
-        print("\n")
-        print("=" * 70)
-        print("FINAL RESULT")
-        print("=" * 70)
-
-        print(
-            json.dumps(
-                final_result,
-                indent=4,
-                ensure_ascii=False
-            )
-        )
-
-        print("\n")
-
-        print(
-            f"Output saved to: {output_file}"
-        )
-
-    except Exception as error:
-
-        print("\n")
-        print("=" * 70)
-        print("ERROR")
-        print("=" * 70)
-
-        print(
-            str(error)
-        )
-
-        print("=" * 70)
-
-        raise
+    )
 
 
 # ============================================================
